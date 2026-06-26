@@ -1,0 +1,357 @@
+<main class="wrap">
+    <section class="card input-card">
+        <label>How to get your data</label>
+        <ol class="steps">
+            <li>
+                Log in at <a
+                    href="https://studentaid.gov/"
+                    target="_blank"
+                    rel="noopener">studentaid.gov</a
+                >.
+            </li>
+            <li>
+                While still logged in, open <a
+                    href="https://studentaid.gov/app/api/nslds/payment-counter/summary"
+                    target="_blank"
+                    rel="noopener">this data page</a
+                >. It shows a block of raw JSON.
+            </li>
+            <li>Select all of it (Ctrl/Cmd + A), copy, and paste it below.</li>
+        </ol>
+        <label for="rawData">Paste your payment-tracker JSON</label>
+        <textarea id="rawData" placeholder='[ { "awardId": ... } ]'></textarea>
+        <button id="go">Analyze my loans</button>
+    </section>
+    <div id="output"></div>
+</main>
+
+<script is:inline>
+    const PLAN_NAMES = {
+        ICR: "Income-Contingent (ICR)",
+        IBR: "Income-Based (IBR)",
+        IBR_2014: "IBR — 2014 New Borrower",
+        SAVE: "SAVE",
+        PAYE: "Pay As You Earn (PAYE)",
+        PSLF: "Public Service (PSLF)",
+        TEPSLF: "Temporary Expanded PSLF",
+    };
+    const LOAN_TYPES = {
+        D1: "Direct Subsidized",
+        D2: "Direct Unsubsidized",
+        D4: "Direct PLUS",
+        D5: "Direct Consolidation (Unsub)",
+        D6: "Direct Consolidation (Sub)",
+    };
+    const SERVICERS = { 578: "Aidvantage" };
+    const IDR_PLANS = ["SAVE", "PAYE", "IBR", "IBR_2014", "ICR"];
+    const PSLF_PLANS = ["PSLF", "TEPSLF"];
+
+    function h(tag, attrs) {
+        var e = document.createElement(tag);
+        if (attrs) {
+            for (var k in attrs) {
+                if (k === "class") e.className = attrs[k];
+                else if (k === "style") e.style.cssText = attrs[k];
+                else e.setAttribute(k, attrs[k]);
+            }
+        }
+        for (var i = 2; i < arguments.length; i++) {
+            var kid = arguments[i];
+            if (kid == null || kid === false) continue;
+            if (Array.isArray(kid)) {
+                for (var j = 0; j < kid.length; j++) {
+                    var sub = kid[j];
+                    if (sub == null || sub === false) continue;
+                    e.append(
+                        sub.nodeType
+                            ? sub
+                            : document.createTextNode(String(sub)),
+                    );
+                }
+            } else {
+                e.append(
+                    kid.nodeType ? kid : document.createTextNode(String(kid)),
+                );
+            }
+        }
+        return e;
+    }
+
+    function money(n) {
+        return (
+            "$" +
+            (n || 0).toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+            })
+        );
+    }
+    function fmtDate(s) {
+        if (!s) return "—";
+        var d = new Date(s);
+        if (isNaN(d)) return s;
+        return d.toLocaleDateString(undefined, {
+            year: "numeric",
+            month: "short",
+        });
+    }
+    function badge(ind) {
+        var map = {
+            Y: ["Eligible", "b-green"],
+            N: ["Not eligible", "b-gray"],
+            U: ["Pending", "b-amber"],
+        };
+        var m = map[ind] || ["—", "b-gray"];
+        return h("span", { class: "badge " + m[1] }, m[0]);
+    }
+    function bar(segs) {
+        var fills = segs.map(function (s) {
+            return h("div", {
+                class: "fill " + s.cls,
+                style: "width:" + Math.max(0, s.pct) + "%",
+            });
+        });
+        return h("div", { class: "track" }, fills);
+    }
+    function stat(label, val) {
+        return h(
+            "div",
+            { class: "stat" },
+            h("div", { class: "stat-label" }, label),
+            h("div", { class: "stat-val" }, val),
+        );
+    }
+
+    function planRow(pc) {
+        var required = pc.forgivenessRequiredPayments || 0;
+        var credited = pc.qualifyingPaymentCount || 0;
+        var remaining =
+            pc.forgivenessRemainingPayments != null
+                ? pc.forgivenessRemainingPayments
+                : Math.max(0, required - credited);
+        var pct = required ? Math.min(100, (credited / required) * 100) : 0;
+        return h(
+            "div",
+            { class: "plan" },
+            h(
+                "div",
+                { class: "plan-top" },
+                h(
+                    "span",
+                    { class: "plan-name" },
+                    PLAN_NAMES[pc.type] || pc.type,
+                ),
+                badge(pc.borrowerEligibleIndicator),
+            ),
+            bar([{ pct: pct, cls: "seg-main" }]),
+            h(
+                "div",
+                { class: "plan-meta" },
+                h(
+                    "span",
+                    {},
+                    credited + " / " + required + " payments credited",
+                ),
+                h("span", {}, remaining + " remaining"),
+            ),
+        );
+    }
+
+    function pslfRow(pc) {
+        var required = pc.forgivenessRequiredPayments || 120;
+        var certified = pc.qualifyingPaymentCount || 0;
+        var eligible = pc.eligiblePaymentCount || 0;
+        var certPct = required
+            ? Math.min(100, (certified / required) * 100)
+            : 0;
+        var eligPct = required ? Math.min(100, (eligible / required) * 100) : 0;
+        var needsCert = eligible > 0 && certified < eligible;
+        return h(
+            "div",
+            { class: "plan" },
+            h(
+                "div",
+                { class: "plan-top" },
+                h(
+                    "span",
+                    { class: "plan-name" },
+                    PLAN_NAMES[pc.type] || pc.type,
+                ),
+                badge(pc.borrowerEligibleIndicator),
+            ),
+            bar([
+                { pct: certPct, cls: "seg-cert" },
+                { pct: eligPct - certPct, cls: "seg-ghost" },
+            ]),
+            h(
+                "div",
+                { class: "plan-meta" },
+                h(
+                    "span",
+                    {},
+                    certified +
+                        " certified · " +
+                        eligible +
+                        " eligible of " +
+                        required,
+                ),
+                h(
+                    "span",
+                    {},
+                    Math.max(0, required - certified) + " still to certify",
+                ),
+            ),
+            needsCert
+                ? h(
+                      "div",
+                      { class: "note small" },
+                      "These " +
+                          eligible +
+                          " payments only count toward PSLF if you certify qualifying public-service employment for those months by filing the PSLF form. Currently certified: " +
+                          certified +
+                          ".",
+                  )
+                : null,
+        );
+    }
+
+    function loanCard(loan) {
+        var counters = {};
+        (loan.paymentCounters || []).forEach(function (pc) {
+            counters[pc.type] = pc;
+        });
+        var bal =
+            (loan.outstandingPrincipalBalance || 0) +
+            (loan.outstandingInterestBalance || 0);
+        var typeName =
+            LOAN_TYPES[loan.loanTypeCode] || "Loan " + loan.loanTypeCode;
+        var idHint = String(loan.nsldsLabel || loan.awardId || "").slice(-4);
+        return h(
+            "div",
+            { class: "card" },
+            h(
+                "div",
+                { class: "loan-head" },
+                h(
+                    "div",
+                    {},
+                    h("div", { class: "loan-type" }, typeName),
+                    h(
+                        "div",
+                        { class: "loan-id" },
+                        idHint ? "ending " + idHint : "",
+                    ),
+                ),
+                h("div", { class: "loan-bal" }, money(bal)),
+            ),
+            h(
+                "div",
+                { class: "loan-sub" },
+                "Principal " +
+                    money(loan.outstandingPrincipalBalance) +
+                    " · Interest " +
+                    money(loan.outstandingInterestBalance) +
+                    " · Est. forgiveness " +
+                    fmtDate(loan.earliestEstimatedForgivenessDate),
+            ),
+            h("div", { class: "section-label" }, "Income-driven repayment"),
+            IDR_PLANS.map(function (t) {
+                return counters[t] ? planRow(counters[t]) : null;
+            }),
+            h("div", { class: "section-label" }, "Public service forgiveness"),
+            PSLF_PLANS.map(function (t) {
+                return counters[t] ? pslfRow(counters[t]) : null;
+            }),
+        );
+    }
+
+    function summaryCard(loans) {
+        var principal = 0,
+            interest = 0,
+            earliest = null;
+        var codes = {};
+        loans.forEach(function (l) {
+            principal += l.outstandingPrincipalBalance || 0;
+            interest += l.outstandingInterestBalance || 0;
+            if (l.currentLoanHolderCode != null)
+                codes[l.currentLoanHolderCode] = true;
+            var d = l.earliestEstimatedForgivenessDate;
+            if (d && (!earliest || d < earliest)) earliest = d;
+        });
+        var servicers = Object.keys(codes)
+            .map(function (c) {
+                return SERVICERS[c] || "Servicer #" + c;
+            })
+            .join(", ");
+        return h(
+            "div",
+            { class: "card summary" },
+            h(
+                "div",
+                {},
+                h("div", { class: "sum-label" }, "Total balance"),
+                h("div", { class: "sum-amount" }, money(principal + interest)),
+            ),
+            h(
+                "div",
+                { class: "sum-grid" },
+                stat("Principal", money(principal)),
+                stat("Accrued interest", money(interest)),
+                stat("Loans", String(loans.length)),
+                stat("Servicer", servicers || "—"),
+                stat("Earliest est. forgiveness", fmtDate(earliest)),
+            ),
+        );
+    }
+
+    function disclaimer() {
+        return h(
+            "div",
+            { class: "note" },
+            h("strong", {}, "How to read this. "),
+            "Every number comes directly from your StudentAid.gov data, including each plan's official required and remaining payment counts. Income-driven plans show payments already credited toward forgiveness. For PSLF, 'certified' payments are the ones that count today; 'eligible' payments count only if you certify qualifying public-service employment for those months. A 'Pending' badge reflects plans affected by ongoing rule changes. This is an estimate, not official guidance.",
+        );
+    }
+
+    function errorBox(msg) {
+        return h("div", { class: "card errbox" }, msg);
+    }
+
+    function analyzeData() {
+        var out = document.getElementById("output");
+        out.innerHTML = "";
+        var loans;
+        try {
+            loans = JSON.parse(document.getElementById("rawData").value);
+        } catch (e) {
+            out.append(
+                errorBox(
+                    "That doesn't look like valid JSON. Copy the entire data block from StudentAid.gov and paste it again.",
+                ),
+            );
+            return;
+        }
+        if (!Array.isArray(loans)) {
+            if (loans && Array.isArray(loans.loans)) loans = loans.loans;
+            else {
+                out.append(
+                    errorBox(
+                        "Expected a list of loans. Make sure you copied the full payment-tracker array.",
+                    ),
+                );
+                return;
+            }
+        }
+        if (loans.length === 0) {
+            out.append(errorBox("No loans found in that data."));
+            return;
+        }
+        out.append(summaryCard(loans));
+        loans.forEach(function (l) {
+            out.append(loanCard(l));
+        });
+        out.append(disclaimer());
+    }
+
+    document.getElementById("go").addEventListener("click", analyzeData);
+</script>
